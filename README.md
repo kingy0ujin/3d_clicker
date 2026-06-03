@@ -187,9 +187,3 @@ MIT License - 자유롭게 사용, 수정, 배포 가능
 이슈 보고 및 PR은 언제든지 환영합니다!
 
 ---
-
-## ⭐ 레딧/소셜 공유
-
-이 프로젝트가 도움이 되었다면 ⭐ 별점을 눌러주세요!
-
-**Made with ❤️ for creators and 3D printing enthusiasts**

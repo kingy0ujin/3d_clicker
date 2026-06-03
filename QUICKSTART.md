@@ -116,22 +116,6 @@ python -m app.main_gradio
 
 ---
 
-## ❓ FAQ
-
-**Q: 이미지가 생성되지 않아요**
-→ `.env` 파일의 `OPENAI_API_KEY` 확인. 유효한 API 키가 필요합니다.
-
-**Q: 3D 메시가 로드되지 않아요**
-→ InstantMesh 모델이 처음 로드될 때 시간이 걸립니다. 재시도하면 빠릅니다.
-
-**Q: STL 파일이 손상되었어요**
-→ 3D 프린팅 소프트웨어(Cura, PrusaSlicer)에서 자동 수리 활성화
-
-**Q: 스위치 홈이 너무 작아요**
-→ `app/utils/trimesh_utils.py`에서 `SWITCH_CAVITY_WIDTH` 값 조정
-
----
-
 ## 📚 상세 문서
 
 - [README.md](README.md) - 프로젝트 전체 설명
