@@ -12,7 +12,7 @@ call venv\Scripts\activate.bat
 REM 3. Install dependencies (optional - only if needed)
 REM pip install -r requirements.txt
 
-REM 4. Run the app
-c:\Users\yujin\Desktop\aiweb_clicker_retry\venv\Scripts\python.exe -m app
+REM 4. Run the app (http://localhost:7860)
+python -m app.main_gradio
 
 pause
