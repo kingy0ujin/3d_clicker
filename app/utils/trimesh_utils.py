@@ -1,12 +1,14 @@
 """
-Trimesh-based Mesh Processing and Auto-Slicing
-Splits 3D mesh into top (keycap) and bottom (housing) parts
-with mechanical switch fitting (14mm x 14mm + cross slot)
+Trimesh-based mesh processing for the keycap assembly.
+
+- 생성된 캐릭터 메시를 불러오고(필요하면 크기/방향 보정)
+- 키캡 하부(base keycap) 위에 정렬해서 결합한다.
+  - 직접 결합: 캐릭터가 닫힌 입체이면 복셀화 없이 형상/텍스처를 그대로 합친다.
+  - 복셀 일체화: 닫힌 입체가 아니면 복셀로 채워 하나의 닫힌 메시로 다시 만든다.
 """
 
 import io
 import logging
-import tempfile
 from pathlib import Path
 from typing import Tuple, Optional, List, Union
 from urllib.parse import urlparse
@@ -15,19 +17,12 @@ from urllib.request import urlopen
 import numpy as np
 import trimesh
 from trimesh import Trimesh
-from scipy.spatial import cKDTree
 
 logger = logging.getLogger(__name__)
 
 
-
 class MeshProcessor:
-    """
-    Processes 3D meshes to prepare them for mechanical assembly:
-    - Auto-slicing at specified height
-    - Boolean operations for switch cavity
-    - Structural validation
-    """
+    """Loads a generated mesh and merges it with the base keycap model."""
 
     def __init__(self, mesh_data: Union[bytes, str], format: str = "obj", preserve_orientation: bool = False):
         """
@@ -44,9 +39,7 @@ class MeshProcessor:
         # generation pipeline and position it on top of the base model as-is.
         self.preserve_orientation = bool(preserve_orientation)
         self.mesh: Optional[Trimesh] = None
-        self.top_mesh: Optional[Trimesh] = None
-        self.bottom_mesh: Optional[Trimesh] = None
-        
+
         self._load_mesh()
 
     def _load_mesh(self) -> None:
@@ -285,6 +278,86 @@ class MeshProcessor:
             return mesh, debug_info
 
   
+    @staticmethod
+    def _closed_solid_or_none(mesh) -> Optional[Trimesh]:
+        """닫힌(watertight) 입체면 (필요하면 작은 구멍을 메운) 복사본을, 아니면 None 을 돌려준다."""
+        if not isinstance(mesh, Trimesh) or len(mesh.faces) == 0:
+            return None
+        candidate = mesh.copy()
+        try:
+            if not candidate.is_watertight:
+                trimesh.repair.fill_holes(candidate)
+            if not candidate.is_watertight:
+                return None
+            if candidate.volume < 0:
+                candidate.invert()
+            return candidate if candidate.volume > 0 else None
+        except Exception as e:
+            logger.warning(f"Closed-solid check failed: {e}")
+            return None
+
+    @staticmethod
+    def _material_image(material):
+        """SimpleMaterial / PBRMaterial 에서 색 텍스처(PIL 이미지)를 꺼낸다."""
+        for name in ("image", "baseColorTexture"):
+            image = getattr(material, name, None)
+            if image is not None:
+                return image
+        return None
+
+    @classmethod
+    def _combine_meshes(cls, solid_mesh: Trimesh, base_mesh: Trimesh) -> Trimesh:
+        """
+        두 메시를 복셀화 없이 하나로 합친다.
+        캐릭터의 텍스처/색은 유지하고, 키캡 하부는 회색으로 칠한다.
+        (텍스처는 아래쪽에 회색 띠를 덧붙인 한 장짜리 아틀라스로 만들어 두 메시가 함께 쓴다)
+        """
+        gray = (190, 190, 190, 255)
+        n_solid = len(solid_mesh.vertices)
+        vertices = np.vstack([solid_mesh.vertices, base_mesh.vertices])
+        faces = np.vstack([solid_mesh.faces, base_mesh.faces + n_solid])
+
+        visual = solid_mesh.visual
+        image = None
+        if getattr(visual, "kind", None) == "texture" and getattr(visual, "uv", None) is not None:
+            image = cls._material_image(visual.material)
+
+        if image is not None:
+            from PIL import Image as PILImage
+
+            image = image.convert("RGB")
+            width, height = image.size
+            strip = max(4, height // 64)
+            atlas = PILImage.new("RGB", (width, height + strip), gray[:3])
+            atlas.paste(image, (0, 0))
+
+            uv_solid = np.asarray(visual.uv, dtype=np.float64).copy()
+            uv_solid[:, 1] = (strip + uv_solid[:, 1] * height) / float(height + strip)
+            uv_base = np.tile(
+                np.array([0.5, (strip / 2.0) / float(height + strip)]), (len(base_mesh.vertices), 1)
+            )
+            return Trimesh(
+                vertices=vertices,
+                faces=faces,
+                visual=trimesh.visual.texture.TextureVisuals(
+                    uv=np.vstack([uv_solid, uv_base]),
+                    material=trimesh.visual.material.SimpleMaterial(image=atlas),
+                ),
+                process=False,
+            )
+
+        try:
+            vis = visual.to_color() if getattr(visual, "kind", None) == "texture" else visual
+            solid_colors = np.asarray(vis.vertex_colors, dtype=np.uint8)
+        except Exception:
+            solid_colors = np.tile(np.array(gray, dtype=np.uint8), (n_solid, 1))
+        base_colors = np.tile(np.array(gray, dtype=np.uint8), (len(base_mesh.vertices), 1))
+        combined = Trimesh(vertices=vertices, faces=faces, process=False)
+        combined.visual = trimesh.visual.ColorVisuals(
+            mesh=combined, vertex_colors=np.vstack([solid_colors, base_colors])
+        )
+        return combined
+
     def merge_solid_mesh_with_base_cap(
         self,
         base_mesh_source: Union[bytes, str],
@@ -298,21 +371,34 @@ class MeshProcessor:
         existing_solid_mesh: Optional[Trimesh] = None,
         existing_solid_info: Optional[dict] = None,
         xy_alignment_mode: str = "bounding_box_center",
+        merge_mode: str = "voxel",
     ) -> Tuple[Trimesh, dict]:
-        """Solidify the current mesh and merge it with a base keycap model.
+        """Align the current mesh on top of a base keycap model and merge them.
 
-        The method first attempts a boolean union. If that is not available,
-        it falls back to voxel-solidifying the aligned assembly so the result is
-        still a single watertight mesh.
+        merge_mode:
+            - "auto"  : 닫힌 입체면 직접 결합, 아니면 복셀 일체화
+            - "direct": 직접 결합을 시도하고, 닫힌 입체가 아니면 복셀 일체화
+            - "voxel" : 항상 복셀 일체화 (단색 일체형, 색/디테일 손실)
         """
         if self.mesh is None:
             raise ValueError("Mesh not loaded")
 
+        merge_mode = (merge_mode or "voxel").strip().lower()
+        use_direct = False
         if existing_solid_mesh is not None:
             solid_mesh = existing_solid_mesh.copy()
             solid_info = existing_solid_info or {}
         else:
-            solid_mesh, solid_info = self.solidify_with_voxels(pitch_mm=pitch_mm, fill_holes=True)
+            closed = self._closed_solid_or_none(self.mesh) if merge_mode in ("auto", "direct") else None
+            if closed is not None:
+                # 복셀화하지 않고 원본 형상(면, 텍스처)을 그대로 사용한다
+                solid_mesh = closed
+                solid_info = {"success": True, "method": "direct"}
+                use_direct = True
+            else:
+                if merge_mode in ("auto", "direct"):
+                    logger.warning("Character mesh is not a closed solid: falling back to voxel solidify")
+                solid_mesh, solid_info = self.solidify_with_voxels(pitch_mm=pitch_mm, fill_holes=True)
         if isinstance(base_mesh_source, str) and base_format == "glb":
             suffix = Path(base_mesh_source.split("?", 1)[0]).suffix.lower()
             if suffix in {".stl", ".obj", ".ply", ".glb", ".gltf"}:
@@ -448,6 +534,18 @@ class MeshProcessor:
         solid_mesh.apply_translation(translation)
 
 
+        if use_direct:
+            # 복셀화 없이 두 메시를 그대로 합친다 (겹친 부분은 슬라이서가 합쳐서 출력한다)
+            combined = self._combine_meshes(solid_mesh, base_mesh)
+            return combined, {
+                "success": True,
+                "method": "direct_assembly",
+                "alignment_translation": translation.tolist(),
+                "result_vertices": len(combined.vertices),
+                "result_faces": len(combined.faces),
+                "result_is_watertight": bool(combined.is_watertight),
+            }
+
         # 🌟 Voxel Assembly (안정적인 출력용 병합)
         assembly_mesh = trimesh.util.concatenate([base_mesh, solid_mesh])
         
@@ -462,8 +560,7 @@ class MeshProcessor:
             fallback_processor.raw_data = None
             fallback_processor.format = "glb"
             fallback_processor.mesh = assembly_mesh
-            fallback_processor.top_mesh = None
-            fallback_processor.bottom_mesh = None
+            fallback_processor.preserve_orientation = True
 
             fallback_pitch = pitch_mm if pitch_mm is not None else max(float(np.max(assembly_mesh.extents)) / 240.0, 0.25)
             merged_mesh, merged_info = fallback_processor.solidify_with_voxels(pitch_mm=fallback_pitch, fill_holes=True)
@@ -480,105 +577,3 @@ class MeshProcessor:
             debug_info["error"] = str(e)
             logger.error(f"Voxel assembly failed: {e}")
             return assembly_mesh, debug_info
-
-    def validate_mesh(self, mesh: Trimesh) -> dict:
-        """
-        Validate mesh for 3D printing viability.
-        
-        Args:
-            mesh: Mesh to validate
-            
-        Returns:
-            Dictionary with validation results
-        """
-        is_valid = getattr(mesh, 'is_valid', True)
-        is_watertight = getattr(mesh, 'is_watertight', False)
-        
-        results = {
-            "is_valid": is_valid,
-            "is_watertight": is_watertight,
-            "faces_count": len(mesh.faces),
-            "vertices_count": len(mesh.vertices),
-            "volume": mesh.volume,
-            "surface_area": mesh.area,
-        }
-        
-        if not is_watertight:
-            logger.warning("Mesh is not watertight - may have issues in 3D printing")
-            results["warnings"] = ["Non-watertight mesh"]
-        
-        return results
-
-    def export_stl(self, mesh: Trimesh, filepath: str) -> bool:
-        """
-        Export mesh to STL format for 3D printing.
-        
-        Args:
-            mesh: Trimesh object to export
-            filepath: Output file path
-            
-        Returns:
-            True if export successful, False otherwise
-        """
-        try:
-            # Export as binary STL (smaller file size)
-            mesh.export(filepath, file_type="stl_ascii")
-            logger.info(f"Mesh exported to {filepath}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error exporting STL: {e}")
-            return False
-
-    def export_obj(self, mesh: Trimesh, filepath: str) -> bool:
-        """
-        Export mesh to OBJ format (for viewing/editing).
-        
-        Args:
-            mesh: Trimesh object to export
-            filepath: Output file path
-            
-        Returns:
-            True if export successful, False otherwise
-        """
-        try:
-            mesh.export(filepath, file_type="obj")
-            logger.info(f"Mesh exported to {filepath}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error exporting OBJ: {e}")
-            return False
-
-    def get_mesh_info(self, mesh: Trimesh, before_vertices: Optional[int] = None, before_faces: Optional[int] = None) -> dict:
-        """Get detailed mesh information for reporting.
-        
-        Args:
-            mesh: Mesh to analyze
-            before_vertices: Vertex count before cavity operation (for comparison)
-            before_faces: Face count before cavity operation (for comparison)
-        """
-        is_valid = getattr(mesh, 'is_valid', True)
-        is_watertight = getattr(mesh, 'is_watertight', False)
-        
-        info = {
-            "vertices": len(mesh.vertices),
-            "faces": len(mesh.faces),
-            "volume_mm3": float(mesh.volume),
-            "surface_area_mm2": float(mesh.area),
-            "is_valid": bool(is_valid),
-            "is_watertight": bool(is_watertight),
-            "bounds": {
-                "min": mesh.bounds[0].tolist(),
-                "max": mesh.bounds[1].tolist()
-            }
-        }
-        
-        # Add cavity operation impact info
-        if before_vertices is not None and before_faces is not None:
-            info["vertex_change"] = len(mesh.vertices) - before_vertices
-            info["face_change"] = len(mesh.faces) - before_faces
-            info["cavity_applied"] = len(mesh.faces) < before_faces
-        
-        return info
-
