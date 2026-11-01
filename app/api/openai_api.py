@@ -53,7 +53,7 @@ class OpenAIImageGenerator:
         size: str = "1024x1024"
     ) -> Optional[Image.Image]:
         """
-        Generate a 3D modeling reference image (side profile) optimized for TripoSR reconstruction.
+        Generate a reference image for the 3D conversion step.
         Returns a PIL Image object decoded from native b64_json response.
         """
         try:
@@ -95,39 +95,4 @@ class OpenAIImageGenerator:
             logger.error(f"Unexpected error during gpt-image-2 generation: {e}")
             raise
 
-    def generate_custom_image(
-        self,
-        prompt: str,
-        size: str = "1024x1024"
-    ) -> Optional[Image.Image]:
-        """
-        Generate 3D modeling reference image with a completely custom prompt layout.
-        """
-        try:
-            logger.info("Generating custom 3D reference image via gpt-image-2 direct call")
-            
-            response = self.client.images.generate(
-                model=self.model,
-                prompt=prompt,
-                n=1,
-                size=size,
-                #response_format="b64_json"
-            )
-            
-            image_b64 = response.data[0].b64_json
-            if not image_b64:
-                return None
-                
-            return Image.open(BytesIO(base64.b64decode(image_b64)))
-            
-        except Exception as e:
-            logger.error(f"Error generating custom image: {e}")
-            raise
 
-    @staticmethod
-    def save_image(image: Image.Image, filepath: str) -> None:
-        """
-        Save PIL Image to local file system for subsequent TripoSR API pipeline transmission.
-        """
-        image.save(filepath, format="PNG")
-        logger.info(f"Image successfully saved to local storage: {filepath}")

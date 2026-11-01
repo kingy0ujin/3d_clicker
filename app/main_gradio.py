@@ -1,23 +1,17 @@
 """
 Image-to-Goods: AI-Driven Custom Clicker Keyring Generator
-Gradio Web Interface (Fixed for TripoSR Serverless Integration)
+Gradio Web Interface
 """
 
 import logging
 import sys
 import tempfile
-from io import BytesIO
 from pathlib import Path
-
-import gradio as gr
-from PIL import Image
-import requests
-from pathlib import Path
-import trimesh
-import numpy as np
 from typing import Optional
 
-from .api import OpenAIImageGenerator, TripoSRModel
+from PIL import Image
+
+from .api import OpenAIImageGenerator, create_mesh_generator
 from .utils import AppConfig, MeshProcessor
 from .ui import create_ui
 
@@ -36,84 +30,24 @@ class ImageToGoodsApp:
         "왼쪽 뒤 225도": 225.0,
         "왼쪽": 270.0,
     }
-    ORIENTATION_AXES = ["Z축(윗면 기준)", "Y축(옆면 기준)"]
-    XY_ALIGNMENT_MODES = ["bottom_face", "centroid", "bounding_box_center"]
-
-    UPRIGHT_TARGET_AXES = ["Z축(기본)", "Y축", "X축"]
     # 기본 프리셋: 후면(캐릭터가 사용자 쪽을 바라보도록 설정)
     DEFAULT_ORIENTATION_PRESET = "후면"
     DEFAULT_ORIENTATION_AXIS = "Y축(옆면 기준)"
-    # Align the model with the keycap's visual center by default.
+    # 키캡의 바운딩 박스 중심에 캐릭터를 맞춘다
     DEFAULT_XY_ALIGNMENT_MODE = "bounding_box_center"
-
     DEFAULT_UPRIGHT_TARGET_AXIS = "X축"
+
     def __init__(self):
         """Initialize application state."""
         self.generated_image = None
-        self.mesh_bytes = None  # TripoSR이 반환하는 raw bytes 저장을 위해 변경
+        self.mesh_bytes = None  # 생성된 메시 파일 경로(GLB)
         self.mesh_format = "glb"
-        self.mesh_height = None  # Store mesh height for slider range
-        self.preview_image = None
-        self.solidified_mesh = None
         self.merged_mesh = None
-        self.top_mesh = None
-        self.bottom_mesh = None
-        self.top_glb_path = None
-        self.bottom_glb_path = None
         self.merged_glb_path = None
-        self.merged_preview_glb_path = None
-
-    def _apply_upright_rotation(self, mesh: trimesh.Trimesh, target_axis: str, context: str = "") -> Optional[str]:
-        if mesh is None:
-            return None
-
-        target_axis = target_axis or self.DEFAULT_UPRIGHT_TARGET_AXIS
-        axis_map = {
-            "X축": "X",
-            "Y축": "Y",
-            "Z축(기본)": "Z",
-        }
-        target = axis_map.get(target_axis, "Z")
-
-        bounds = mesh.bounds
-        sizes = {
-            "X": bounds[1, 0] - bounds[0, 0],
-            "Y": bounds[1, 1] - bounds[0, 1],
-            "Z": bounds[1, 2] - bounds[0, 2],
-        }
-        largest_axis = max(sizes.items(), key=lambda x: x[1])[0]
-        if largest_axis == target:
-            return f"largest axis {largest_axis} already aligned to {target}"
-
-        if largest_axis == "X" and target == "Z":
-            rotation_axis = [0, 1, 0]
-            angle = np.pi / 2
-        elif largest_axis == "Y" and target == "Z":
-            rotation_axis = [1, 0, 0]
-            angle = np.pi / 2
-        elif largest_axis == "Z" and target == "X":
-            rotation_axis = [0, 1, 0]
-            angle = -np.pi / 2
-        elif largest_axis == "Z" and target == "Y":
-            rotation_axis = [1, 0, 0]
-            angle = -np.pi / 2
-        elif largest_axis == "X" and target == "Y":
-            rotation_axis = [0, 0, 1]
-            angle = np.pi / 2
-        elif largest_axis == "Y" and target == "X":
-            rotation_axis = [0, 0, 1]
-            angle = -np.pi / 2
-        else:
-            return f"no supported rotation from {largest_axis} to {target}"
-
-        center = (bounds[0] + bounds[1]) / 2.0
-        rot = trimesh.transformations.rotation_matrix(angle, rotation_axis, point=center)
-        mesh.apply_transform(rot)
-        return f"largest axis {largest_axis} -> rotate to {target}"
 
     def generate_image_openai(self, concept: str) -> tuple:
         """
-        Generate side-profile image using OpenAI DALL-E 3 (via gpt-image-2 direct call).
+        Generate a reference image with OpenAI gpt-image-2.
 
         Args:
             concept: User's concept description
@@ -162,27 +96,8 @@ class ImageToGoodsApp:
             logger.error(f"Image upload error: {e}")
             return None, f"❌ 오류: {str(e)}"
 
-    def load_sample_image(self, url: str) -> tuple:
-        """Download a sample image from `url` and set it as the current generated image."""
-        try:
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
-            image = Image.open(BytesIO(resp.content))
-            # Convert to RGB for downstream consistency
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-            self.generated_image = image
-            return image, "✅ 샘플 이미지 로드 완료"
-        except Exception as e:
-            logger.error(f"Sample image load error: {e}")
-            return None, f"❌ 샘플 이미지 불러오기 실패: {e}"
-
     def ensure_sample_assets(self) -> list:
-        """Ensure sample assets directory exists and return list of existing sample files.
-
-        This function no longer creates placeholder images. Samples must come from
-        user-saved images (via `save_current_image_as_sample`).
-        """
+        """Return the list of sample image files in `assets/samples` (png/jpg/jpeg)."""
         try:
             base = Path(__file__).resolve().parent
             samples_dir = base / "assets" / "samples"
@@ -247,11 +162,12 @@ class ImageToGoodsApp:
         target_height_mm: float = 100.0
     ) -> tuple:
         """
-        Generate 3D mesh using TripoSR via Gradio Client.
+        Generate a 3D mesh from the current image with the configured backend
+        (AppConfig.IMAGE_TO_3D_BACKEND: "lowpoly" 기본, "triposr" 선택).
 
         Args:
             remove_background: Remove background from image
-            foreground_ratio: Ratio of foreground (0.5-1.0)
+            foreground_ratio: Ratio of foreground (0.5-1.0), TripoSR 전용
             marching_cubes_resolution: Mesh resolution (32-320)
             target_height_mm: Target mesh height in mm
 
@@ -262,14 +178,13 @@ class ImageToGoodsApp:
             return "❌ 먼저 이미지를 생성하거나 업로드해주세요", None
 
         try:
-            logger.info(f"Generating 3D mesh with parameters:")
-            logger.info(f"  remove_background={remove_background}")
-            logger.info(f"  foreground_ratio={foreground_ratio}")
-            logger.info(f"  marching_cubes_resolution={marching_cubes_resolution}")
-            logger.info(f"  target_height_mm={target_height_mm}")
+            logger.info(
+                f"Generating 3D mesh: remove_background={remove_background}, "
+                f"foreground_ratio={foreground_ratio}, resolution={marching_cubes_resolution}, "
+                f"target_height_mm={target_height_mm}"
+            )
 
-            mesh_gen = TripoSRModel()
-            # Pass all parameters to TripoSR
+            mesh_gen = create_mesh_generator()
             mesh_result = mesh_gen.generate_3d_mesh(
                 image=self.generated_image,
                 remove_background=remove_background,
@@ -278,50 +193,42 @@ class ImageToGoodsApp:
             )
 
             if mesh_result and mesh_result.get("success"):
-                # TripoSR의 결과 메시 파일 경로 저장
                 self.mesh_bytes = mesh_result.get("mesh_data")
-                mesh_obj = mesh_result.get("mesh_data_obj")
                 mesh_format = mesh_result.get("format", "glb")
                 self.mesh_format = mesh_format
                 self.merged_mesh = None
                 self.merged_glb_path = None
-                self.top_mesh = None
-                self.bottom_mesh = None
-                self.top_glb_path = None
-                self.bottom_glb_path = None
-                
+
+                mesh_size = 0
                 try:
-                    from pathlib import Path
-                    # MeshProcessor imported from utils above
-                    mesh_size = 0
                     if isinstance(self.mesh_bytes, str) and Path(self.mesh_bytes).exists():
                         mesh_size = Path(self.mesh_bytes).stat().st_size / (1024 * 1024)
-                    
-                    # Load mesh temporarily to get bounds and apply target height scaling
+
+                    # 높이를 목표값으로 맞춘다. 높이 축은 Z 로 가정한다(결합 단계가 회전으로 세워 준다)
                     temp_processor = MeshProcessor(
                         mesh_data=self.mesh_bytes,
                         format=mesh_format,
                         preserve_orientation=True,
                     )
-                    
-                    # Apply custom target height scaling
                     bounds = temp_processor.mesh.bounds
                     current_height = bounds[1, 2] - bounds[0, 2]
-                    
+
                     if current_height > 0 and current_height != target_height_mm:
-                        # Scale to target height
                         scale_factor = target_height_mm / current_height
                         temp_processor.mesh.apply_scale(scale_factor)
                         logger.info(f"Scaled mesh from {current_height:.2f}mm to {target_height_mm:.2f}mm (factor: {scale_factor:.2f}x)")
-                        
-                        # Re-export scaled mesh
+
+                        # 원본 파일을 덮어쓰지 않고 새 임시 파일에 저장한다
                         if isinstance(self.mesh_bytes, str):
-                            temp_processor.mesh.export(self.mesh_bytes, file_type=mesh_format)
-                    
-                    # Get final bounds
+                            scaled_path = tempfile.NamedTemporaryFile(
+                                suffix=f"_scaled.{mesh_format}", delete=False
+                            ).name
+                            temp_processor.mesh.export(scaled_path, file_type=mesh_format)
+                            self.mesh_bytes = scaled_path
+
                     final_bounds = temp_processor.mesh.bounds
                     final_height = final_bounds[1, 2] - final_bounds[0, 2]
-                    
+
                     status_msg = (
                         f"✅ 3D 메시 생성 완료!\n"
                         f"형식: {mesh_format.upper()}\n"
@@ -329,42 +236,19 @@ class ImageToGoodsApp:
                         f"메시 높이: {final_height:.1f}mm\n"
                         f"해상도: {marching_cubes_resolution}"
                     )
-                    
-                    # Store mesh height for slider update
-                    self.mesh_height = final_height
-
-                    # 🌟 [핵심 변경] 그래프(fig) 객체 대신, GLB 파일 경로(self.mesh_bytes)를 반환하도록 수정
                     return status_msg, self.mesh_bytes
-                    
+
                 except Exception as e:
                     logger.warning(f"Could not get mesh bounds: {e}")
-                    self.preview_image = None
                     return f"✅ 3D 메시 생성 완료!\n형식: {mesh_format.upper()}\n크기: {mesh_size:.2f}MB", self.mesh_bytes
-            else:
-                # If upstream provided an error message, forward it to the UI
-                try:
-                    if isinstance(mesh_result, dict) and mesh_result.get("error"):
-                        return f"❌ 3D 메시 생성 실패: {mesh_result.get('error')}", None
-                except Exception:
-                    pass
-                return "❌ 3D 메시 생성 실패", None
+
+            if isinstance(mesh_result, dict) and mesh_result.get("error"):
+                return f"❌ 3D 메시 생성 실패: {mesh_result.get('error')}", None
+            return "❌ 3D 메시 생성 실패", None
 
         except Exception as e:
             logger.error(f"Mesh generation error: {e}")
             return f"❌ 오류: {str(e)}", None
-
-
-    def _build_axis_rotation(self, mesh: trimesh.Trimesh, angle_deg: float, axis_key: str) -> Optional[np.ndarray]:
-        axis = {
-            "Z축(윗면 기준)": [0, 0, 1],
-            "Y축(옆면 기준)": [0, 1, 0],
-        }.get(axis_key)
-        if axis is None or mesh is None:
-            return None
-        bounds = mesh.bounds
-        center = (bounds[0] + bounds[1]) / 2.0
-        return trimesh.transformations.rotation_matrix(np.deg2rad(float(angle_deg)), axis, point=center)
-
 
     def merge_solid_mesh_with_base_keycap(
         self,
@@ -374,7 +258,11 @@ class ImageToGoodsApp:
         upright_target_axis: str,
         xy_alignment_mode: str,
     ) -> tuple:
-        """Solidify the generated model and merge it with the configured base keycap."""
+        """
+        Merge the generated model with the configured base keycap.
+
+        AppConfig.MERGE_MODE 에 따라 직접 결합(auto/direct) 또는 복셀 일체화(voxel)로 합친다.
+        """
         if self.mesh_bytes is None:
             return None, "❌ 먼저 3D 메시를 생성해주세요"
 
@@ -393,12 +281,6 @@ class ImageToGoodsApp:
                 format=self.mesh_format,
                 preserve_orientation=True,
             )
-            # Reuse preview solid if available to avoid expensive re-solidify
-            existing_solid = None
-            existing_solid_info = None
-            if hasattr(self, 'last_preview_solid') and self.last_preview_solid is not None:
-                existing_solid = self.last_preview_solid
-                existing_solid_info = getattr(self, 'last_preview_solid_info', None)
 
             merged_mesh, debug_info = processor.merge_solid_mesh_with_base_cap(
                 base_mesh_source=base_source,
@@ -409,9 +291,8 @@ class ImageToGoodsApp:
                 orientation_yaw_deg=orientation_yaw_deg,
                 orientation_axis=orientation_axis,
                 upright_target_axis=upright_target_axis,
-                existing_solid_mesh=existing_solid,
-                existing_solid_info=existing_solid_info,
                 xy_alignment_mode=xy_alignment_mode,
+                merge_mode=AppConfig.MERGE_MODE,
             )
 
             if merged_mesh is None:
@@ -421,11 +302,9 @@ class ImageToGoodsApp:
             merged_glb = tempfile.NamedTemporaryFile(suffix="_merged.glb", delete=False).name
             merged_mesh.export(merged_glb)
             self.merged_glb_path = merged_glb
-            self.merged_preview_glb_path = debug_info.get("preview_glb_path")
 
-            status_msg = "✅ 기본 상부와 합치기 완료!"
-
-            return self.merged_preview_glb_path or merged_glb, status_msg
+            method = debug_info.get("method", "unknown")
+            return merged_glb, f"✅ 기본 상부와 합치기 완료! (방식: {method})"
 
         except Exception as e:
             logger.error(f"Keycap union error: {e}")
@@ -489,23 +368,13 @@ class ImageToGoodsApp:
 
     def download_stl_bottom(self):
         """
-        키링용 하단부 고정 파일(base_keycap2.stl)을 다운로드하도록 경로를 반환합니다.
+        키링용 하단부 고정 파일(app/assets/base_keycap2.stl)의 경로를 다운로드 버튼에 넘겨준다.
         """
-        from pathlib import Path
-        
-        # 프로젝트 최상단 디렉토리 또는 현재 파일 위치를 기준으로 assets 경로를 잡습니다.
-        # (프로젝트 구조에 따라 부모 디렉토리 .parent 호출 횟수를 조절해 주세요)
-        base_dir = Path(__file__).resolve().parent
-        file_path = base_dir / "assets" / "base_keycap2.stl"
-        
+        file_path = Path(__file__).resolve().parent / "assets" / "base_keycap2.stl"
         if file_path.exists():
-            # 파일이 존재하면 해당 경로를 문자열로 반환하여 Gradio 다운로드 버튼에 넘겨줌
             return str(file_path)
-        else:
-            # 파일이 없을 경우 콘솔에 에러를 띄우고 None 반환
-            print(f"❌ 파일을 찾을 수 없습니다: {file_path}")
-            return None
-
+        logger.error(f"파일을 찾을 수 없습니다: {file_path}")
+        return None
 
 
 def main():
@@ -513,7 +382,6 @@ def main():
 
     # Validate configuration via AppConfig
     try:
-        # 시스템에 매핑된 환경 변수 키 자동 검증
         AppConfig.validate()
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
@@ -522,14 +390,8 @@ def main():
     # Initialize app
     app = ImageToGoodsApp()
 
-    try:
-        import scipy  # noqa: F401
-        scipy_status = "available"
-    except Exception as e:
-        scipy_status = f"missing ({e})"
-
     logger.info(f"Python executable: {sys.executable}")
-    logger.info(f"SciPy status: {scipy_status}")
+    logger.info(f"Image-to-3D backend: {AppConfig.IMAGE_TO_3D_BACKEND}, merge mode: {AppConfig.MERGE_MODE}")
 
     # Create and launch UI
     interface = create_ui(app)
