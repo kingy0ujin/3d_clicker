@@ -2,32 +2,24 @@
 
 ## 📋 사전 준비
 
-### 1. API 키 발급 (5분)
+### 1. OpenAI API 키 발급 (필수)
 
-**OpenAI API Key (필수):**
 1. https://platform.openai.com/api-keys 방문
 2. **Create new secret key** 클릭
-3. 키 복사 후 저장
+3. 키를 복사해 둡니다.
 
-**Hugging Face Token (선택사항):**
-- 공개 HF Spaces를 사용하므로 토큰 없이도 실행 가능
-- 필요한 경우: https://huggingface.co/settings/tokens에서 발급
+이미지 생성에만 쓰입니다. 이미지를 직접 업로드하거나 샘플을 쓰더라도 앱 시작 시 키가 설정돼 있어야 합니다.
 
-### 2. 환경 설정 (1분)
+### 2. 환경 설정
 
-`.env` 파일 생성:
+프로젝트 루트에 `.env` 파일을 만들고 키를 넣습니다.
 
-```bash
-cp .env.example .env
-```
-
-`.env` 파일 편집:
 ```
 OPENAI_API_KEY=sk_your_key_here
-# HF_API_TOKEN은 선택사항
-# HF_API_TOKEN=hf_your_token_here
-# BASE_KEYCAP_MODEL_SOURCE=https://your-server/path/to/base_keycap.glb
 ```
+
+3D 변환은 내 PC에서 실행되므로 Hugging Face 토큰이나 GPU는 필요 없습니다.
+(선택 설정은 [README.md](README.md)의 환경 변수 표를 참고하세요.)
 
 ---
 
@@ -60,87 +52,57 @@ pip install -r requirements.txt
 ### 4️⃣ 앱 실행
 
 ```bash
-# Windows (venv 활성화 후)
-venv\Scripts\python.exe -m app.main_gradio
-
-# 또는
 python -m app.main_gradio
 ```
 
-✅ 앱이 시작되면 브라우저에서 **http://localhost:7860** 열기
+Windows에서는 `run.bat`을 실행해도 됩니다.
+앱이 시작되면 브라우저에서 **http://localhost:7860** 을 엽니다.
 
 ---
 
----
+## 🎯 사용 방법
 
-## 🎯 사용 방법 (2분)
+### 예시: 귀여운 강아지 키캡 만들기
 
-### 예시: 귀여운 강아지 키캡/키캡 키링 만들기
+1. **Page 1**: "귀여운 강아지"를 입력하고 **이미지 생성**을 누릅니다. (이미지 업로드나 샘플 선택도 가능)
+2. **Page 2**: **3D 메시 빌드**를 누릅니다. 해상도 슬라이더로 삼각형 수를 조절합니다.
+3. **Page 3**: 축 방향 프리셋을 고르고 **하부와 결합**을 누릅니다.
+4. **다운로드**: 최종 GLB/OBJ를 내려받습니다. 키링용 하부 STL도 받을 수 있습니다.
+5. **3D 프린팅**: 파일을 출력합니다.
+6. **조립**: 기계식 스위치(키축)를 끼우고 상하부를 결합합니다.
 
-1. **아이디어 입력**: "귀여운 강아지"
-2. **이미지 생성 클릭** → 30초 대기
-3. **3D 메시 생성 클릭** → 50초 대기
-4. **키캡 하단부와 결합 클릭** → 30초 대기
-6. **obj, glb 다운로드**: 완성된 커스텀 키캡 파일 다운로드
-7. **3D 프린팅**: 각 3D 파일 출력
-8. **조립**: 키보드에 결합/ 기계식 스위치(키축) 끼운 후 상하부 결합
-
----
-
-## 📊 처리 시간
-
-| 단계 | 소요 시간 |
-|------|---------|
-| 이미지 생성 | 30초 |
-| 3D 메시 생성 | 50초 |
-| 메시 처리 | 30초 |
-| **총 시간** | **1분 50초** |
+### 잘 나오게 하는 팁
+- 배경이 투명한 PNG나, 배경이 단색인 이미지를 쓰면 실루엣이 정확합니다.
+- 팔이 몸에 붙은 구조처럼 여러 덩어리인 이미지는 가장 큰 덩어리 하나만 사용합니다.
+- 결합 결과의 방향이 어색하면 **축 방향 프리셋**을 바꿔 보세요.
 
 ---
 
-## 🔍 API 상태 확인
+## 🔍 문제 해결
 
-```bash
-# API 연결 점검은 앱 실행 후 로그에서 확인하거나, 필요 시 별도 스크립트를 만드세요.
-```
-
----
-
-## 💰 예상 비용 
-
-| 서비스 | 비용 |
-|--------|------|
-| OpenAI gpt-image-2 (hd) | $5.00 |
-| Hugging Face | 무료 |
-| **합계** | **$4/월** |
-
----
-
-## 📚 상세 문서
-
-- [README.md](README.md) - 프로젝트 전체 설명
-- [OpenAI API 문서](https://platform.openai.com/docs/)
-- [HF InstantMesh](https://huggingface.co/TencentARC/InstantMesh)
-- [Trimesh 문서](https://trimesh.org/)
+| 증상 | 확인할 것 |
+|------|-----------|
+| 시작하자마자 종료 | `.env`에 `OPENAI_API_KEY`가 있는지 확인 |
+| "이미지에서 물체를 찾지 못했습니다" | 배경이 복잡하거나 물체와 배경 색이 비슷함 → 투명 PNG 사용 |
+| 결합 실패 | `app/assets/base_keycap.stl`이 있는지, `BASE_KEYCAP_MODEL_SOURCE` 경로가 맞는지 확인 |
+| 결합 결과가 계단 모양에 색이 없음 | `MERGE_MODE=voxel`이거나 캐릭터가 닫힌 입체가 아닌 경우 → `MERGE_MODE=auto` 확인 |
 
 ---
 
 ## 🐳 Docker 배포 (HF Spaces)
 
 ```bash
-# HF Spaces에서 "Docker 모드" 공간 생성 후:
-git clone https://huggingface.co/spaces/your-user/your-space
-cd your-space
-
-# 파일 복사
-cp -r /path/to/aiweb_clicker/* .
-
-# 배포
-git add .
-git commit -m "Deploy Image-to-Goods"
-git push
+docker build -t image-to-goods:latest .
+docker run -d -p 7860:7860 --env-file .env image-to-goods:latest
 ```
+
+HF Space에서는 `.github/workflows/sync-to-hf.yml`이 main에 push할 때 자동으로 동기화합니다.
 
 ---
 
-**다음 단계:** `.env` 파일을 만들고 앱을 실행하세요: `python -m app.main_gradio` 🎉
+## 📚 상세 문서
+
+- [README.md](README.md) - 프로젝트 전체 설명
+- [ARCHITECTURE.md](ARCHITECTURE.md) - 구조와 처리 흐름
+- [Trimesh 문서](https://trimesh.org/)
+
